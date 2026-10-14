@@ -55,7 +55,7 @@ curl -fsSL https://get.docker.com | sudo sh
 sudo apt-get install -y git
 
 # 2. Baixar o código (repositório privado: autentique com `gh auth login` ou um token de acesso)
-git clone https://github.com/SEU_USUARIO/pomodoro-bot.git
+git clone https://github.com/Desnecessaulo/pomodoro-bot.git
 cd pomodoro-bot
 
 # 3. Criar o .env com o token
