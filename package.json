@@ -1,0 +1,38 @@
+{
+  "name": "pomodoro-bot",
+  "version": "1.0.0",
+  "description": "Pomodoro BOT — bot de Discord que muta a sala de voz durante o Pomodoro",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "deploy": "tsx --env-file-if-exists=.env src/scripts/deploy-commands.ts",
+    "deploy:prod": "node --env-file-if-exists=.env dist/scripts/deploy-commands.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "discord.js": "^14.27.0",
+    "ffmpeg-static": "^5.3.0",
+    "opusscript": "^0.0.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.5",
+    "eslint": "^10.12.0",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.71.2"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22.12"
+  }
+}
