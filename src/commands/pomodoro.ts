@@ -1,7 +1,7 @@
 import { InteractionContextType, SlashCommandBuilder } from 'discord.js';
 import { MAX_POMODORO_MINUTES, MINUTE_MS } from '../config.js';
 import { UserError } from '../errors.js';
-import { discordRelativeTime } from '../pomodoro/time.js';
+import { statusMessage, stoppedMessage } from '../pomodoro/messages.js';
 import type { Command } from '../types.js';
 
 export const pomodoroCommand: Command = {
@@ -35,10 +35,7 @@ export const pomodoroCommand: Command = {
         const minutes = interaction.options.getInteger('minutos');
         const durationMs = minutes ? minutes * MINUTE_MS : config.pomodoroMs;
         // Avisos (Pomodoro já ativo, sala errada...) são respondidos só para quem usou o comando.
-        const announcement = await manager.start(interaction, durationMs, () =>
-          interaction.deferReply(),
-        );
-        await interaction.editReply(announcement);
+        await manager.start(interaction, durationMs, () => interaction.deferReply());
         return;
       }
 
@@ -49,25 +46,26 @@ export const pomodoroCommand: Command = {
         }
         await interaction.deferReply();
         await manager.stop(guildId, 'command');
-        await interaction.editReply(
-          `⏹️ Pomodoro encerrado por ${interaction.user}. Microfones liberados e saí da sala.`,
-        );
+        await interaction.editReply(stoppedMessage(interaction.client, interaction.user.id));
         return;
       }
 
       case 'status': {
-        const channelId = store.get(guildId).voiceChannelId;
-        let content: string;
-        if (session?.phase === 'focus') {
-          content = `🍅 Foco em andamento em ${session.voiceChannel} — termina ${discordRelativeTime(session.endsAt)}.`;
-        } else if (session?.phase === 'awaiting') {
-          content = `⏰ O Pomodoro acabou em ${session.voiceChannel}; aguardando para começar outro.`;
-        } else {
-          content = channelId
-            ? `💤 Nenhum Pomodoro ativo. Sala configurada: <#${channelId}>.`
-            : '💤 Nenhum Pomodoro ativo e nenhuma sala configurada (use `/config sala`).';
-        }
-        await interaction.reply({ content, flags: 'Ephemeral' });
+        const { client } = interaction;
+        const message =
+          session?.phase === 'focus'
+            ? statusMessage(client, {
+                phase: 'focus',
+                voiceChannel: session.voiceChannel,
+                endsAt: session.endsAt,
+              })
+            : session?.phase === 'awaiting'
+              ? statusMessage(client, { phase: 'awaiting', voiceChannel: session.voiceChannel })
+              : statusMessage(client, {
+                  phase: 'idle',
+                  configuredChannelId: store.get(guildId).voiceChannelId,
+                });
+        await interaction.reply({ ...message, flags: 'Ephemeral' });
         return;
       }
     }

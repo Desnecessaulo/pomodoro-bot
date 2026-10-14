@@ -10,14 +10,9 @@ import type { AppConfig } from '../config.js';
 import { UserError } from '../errors.js';
 import { logger } from '../logger.js';
 import type { GuildStore } from '../storage/GuildStore.js';
+import { BUTTON_AGAIN, stoppedMessage } from './messages.js';
 import { MuteService } from './MuteService.js';
-import {
-  BUTTON_AGAIN,
-  BUTTON_STOP,
-  isBot,
-  PomodoroSession,
-  type StopReason,
-} from './PomodoroSession.js';
+import { isBot, PomodoroSession, type Publish, type StopReason } from './PomodoroSession.js';
 import { discordRelativeTime } from './time.js';
 import { setVoiceChannelStatus } from './voiceStatus.js';
 
@@ -48,13 +43,15 @@ export class PomodoroManager {
   /**
    * /pomodoro iniciar — entra na sala configurada e começa o foco com a duração escolhida.
    * `onValidated` é chamado quando todas as checagens passam, antes da parte demorada.
+   * O anúncio é publicado como resposta ao comando.
    */
   async start(
     interaction: ChatInputCommandInteraction<'cached'>,
     durationMs: number,
     onValidated: () => Promise<unknown>,
-  ): Promise<string> {
+  ): Promise<void> {
     const { guild, guildId, member, channel: textChannel } = interaction;
+    const publish: Publish = (message) => interaction.editReply(message);
 
     const existing = this.sessions.get(guildId);
     if (existing?.phase === 'focus') {
@@ -74,8 +71,8 @@ export class PomodoroManager {
       this.starting.add(guildId);
       try {
         await onValidated();
-        await existing.dismissPrompt();
-        return await existing.startFocus(interaction.user.id, durationMs);
+        await existing.dismissControlMessage();
+        return await existing.startFocus(interaction.user.id, publish, durationMs);
       } finally {
         this.starting.delete(guildId);
       }
@@ -128,7 +125,7 @@ export class PomodoroManager {
         interaction.user.id,
       );
       this.sessions.set(guildId, session);
-      return await session.startFocus(interaction.user.id, durationMs);
+      return await session.startFocus(interaction.user.id, publish, durationMs);
     } catch (error) {
       logger.error(`Falha ao iniciar Pomodoro em ${guild.name}.`, error);
       throw new UserError(`Não consegui entrar em ${voiceChannel}. Tente novamente em instantes.`);
@@ -153,12 +150,12 @@ export class PomodoroManager {
     return true;
   }
 
-  /** Botões "Começar outro" / "Encerrar" da mensagem de fim do Pomodoro. */
+  /** Botões "Encerrar" (durante o foco) e "Iniciar outro" (depois do foco). */
   async handleButton(interaction: ButtonInteraction<'cached'>): Promise<void> {
     const session = this.sessions.get(interaction.guildId);
-    if (!session?.isPrompt(interaction.message.id)) {
+    if (!session?.isActiveButton(interaction.message.id, interaction.customId)) {
       await interaction.reply({
-        content: 'Este convite já expirou. Use `/pomodoro iniciar` para começar um novo.',
+        content: 'Este botão já expirou. Use `/pomodoro iniciar` para começar um novo.',
         flags: 'Ephemeral',
       });
       return;
@@ -177,20 +174,15 @@ export class PomodoroManager {
       return;
     }
 
+    // A mensagem do botão passa a ser editada aqui (e não pela sessão); tirar antes do
+    // primeiro await evita que dois cliques simultâneos sejam processados.
+    session.takeControlMessage();
     await interaction.deferUpdate();
-    session.takePrompt();
-    if (interaction.customId === BUTTON_AGAIN) {
-      const announcement = await session.startFocus(interaction.user.id);
-      await interaction.editReply({
-        content: `${announcement}\n-# Iniciado por ${interaction.user}`,
-        components: [],
-      });
-    } else if (interaction.customId === BUTTON_STOP) {
+    if (isAgain) {
+      await session.startFocus(interaction.user.id, (message) => interaction.editReply(message));
+    } else {
       await session.stop('button');
-      await interaction.editReply({
-        content: `👋 Pomodoro encerrado por ${interaction.user}. Saí da sala — bom descanso!`,
-        components: [],
-      });
+      await interaction.editReply(stoppedMessage(this.client, interaction.user.id));
     }
   }
 

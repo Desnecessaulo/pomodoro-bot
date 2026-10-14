@@ -5,10 +5,8 @@ import {
   type VoiceConnection,
 } from '@discordjs/voice';
 import {
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   PermissionFlagsBits,
+  type BaseMessageOptions,
   type Guild,
   type GuildMember,
   type GuildTextBasedChannel,
@@ -27,21 +25,22 @@ import {
 import { logger } from '../logger.js';
 import type { GuildStore } from '../storage/GuildStore.js';
 import { SoundPlayer } from './audio.js';
+import {
+  BUTTON_AGAIN,
+  BUTTON_STOP,
+  disconnectedMessage,
+  focusEndedMessage,
+  focusStartedMessage,
+  promptTimedOutMessage,
+} from './messages.js';
 import type { MuteService } from './MuteService.js';
 import { setVoiceChannelStatus } from './voiceStatus.js';
-import {
-  buildIntervalMarks,
-  buildNicknameSchedule,
-  discordRelativeTime,
-  formatDuration,
-  pomodoroNickname,
-} from './time.js';
-
-export const BUTTON_AGAIN = 'pomodoro:again';
-export const BUTTON_STOP = 'pomodoro:stop';
+import { buildIntervalMarks, buildNicknameSchedule, pomodoroNickname } from './time.js';
 
 export type Phase = 'focus' | 'awaiting' | 'ended';
 export type StopReason = 'command' | 'button' | 'timeout' | 'disconnected' | 'shutdown';
+/** Envia (ou edita) a mensagem de anúncio e devolve a mensagem que ficou no chat. */
+export type Publish = (message: BaseMessageOptions) => Promise<Message>;
 
 export interface SessionDeps {
   config: AppConfig;
@@ -57,7 +56,8 @@ export class PomodoroSession {
   durationMs: number;
   private cycle = 0;
   private timers: NodeJS.Timeout[] = [];
-  private prompt?: Message;
+  /** Mensagem com o botão ativo: "Encerrar" durante o foco, "Iniciar outro" depois dele. */
+  private controlMessage?: Message;
   private readonly sounds: SoundPlayer;
 
   private constructor(
@@ -112,8 +112,11 @@ export class PomodoroSession {
     return this.phase === 'focus';
   }
 
-  isPrompt(messageId: string): boolean {
-    return this.phase === 'awaiting' && this.prompt?.id === messageId;
+  /** O botão clicado é o que está ativo agora (e não um de uma mensagem antiga)? */
+  isActiveButton(messageId: string, customId: string): boolean {
+    const expected =
+      this.phase === 'focus' ? BUTTON_STOP : this.phase === 'awaiting' ? BUTTON_AGAIN : undefined;
+    return customId === expected && this.controlMessage?.id === messageId;
   }
 
   /** Quem pode controlar: quem iniciou, quem está na sala ou quem gerencia o servidor. */
@@ -130,12 +133,16 @@ export class PomodoroSession {
   }
 
   /**
-   * Inicia um ciclo de foco e retorna a mensagem de anúncio. Sem `durationMs`,
-   * repete a duração do ciclo anterior (usado pelo botão "Começar outro").
+   * Inicia um ciclo de foco e publica o anúncio (com o botão "Encerrar") via `publish`.
+   * Sem `durationMs`, repete a duração do ciclo anterior (usado pelo botão "Iniciar outro").
    */
-  async startFocus(startedById: string, durationMs = this.durationMs): Promise<string> {
+  async startFocus(
+    startedById: string,
+    publish: Publish,
+    durationMs = this.durationMs,
+  ): Promise<void> {
     this.clearTimers();
-    this.prompt = undefined;
+    this.controlMessage = undefined;
     this.startedById = startedById;
     this.durationMs = durationMs;
     this.phase = 'focus';
@@ -163,11 +170,22 @@ export class PomodoroSession {
     logger.info(
       `Pomodoro #${this.cycle} iniciado em ${this.guild.name} (${this.voiceChannel.name}).`,
     );
-    const title = this.cycle > 1 ? `Pomodoro #${this.cycle} iniciado!` : 'Pomodoro iniciado!';
-    return (
-      `🍅 **${title}** Foco total por **${formatDuration(durationMs)}** em ${this.voiceChannel}.\n` +
-      `🔇 Microfones mutados — termina ${discordRelativeTime(this.endsAt)}.`
-    );
+    const announcement = focusStartedMessage({
+      client: this.guild.client,
+      cycle: this.cycle,
+      durationMs,
+      endsAt: this.endsAt,
+      voiceChannel: this.voiceChannel,
+      startedById,
+    });
+    try {
+      const message = await publish(announcement);
+      // O foco pode ter sido parado enquanto a mensagem era enviada.
+      if (this.phase === 'focus') this.controlMessage = message;
+      else await message.edit({ components: [] }).catch(() => undefined);
+    } catch (error) {
+      logger.warn(`Não consegui enviar o anúncio do Pomodoro em ${this.guild.name}.`, error);
+    }
   }
 
   /** Fim do foco: desmuta, restaura o apelido e pergunta se querem outro Pomodoro. */
@@ -175,6 +193,7 @@ export class PomodoroSession {
     if (this.phase !== 'focus') return;
     this.phase = 'awaiting';
     this.clearTimers();
+    await this.dismissControlMessage();
 
     await this.unmuteEveryone();
     await this.restoreNickname();
@@ -182,24 +201,10 @@ export class PomodoroSession {
     this.sounds.play(SOUNDS.end);
 
     const { responseTimeoutMs } = this.deps.config;
-    const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(BUTTON_AGAIN)
-        .setLabel('Começar outro')
-        .setEmoji('🍅')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(BUTTON_STOP)
-        .setLabel('Encerrar')
-        .setStyle(ButtonStyle.Secondary),
-    );
     try {
-      this.prompt = await this.textChannel.send({
-        content:
-          `⏰ **O Pomodoro acabou!** Microfones liberados em ${this.voiceChannel}.\n` +
-          `Querem começar outro? Se ninguém responder em ${formatDuration(responseTimeoutMs)}, eu saio da sala.`,
-        components: [buttons],
-      });
+      this.controlMessage = await this.textChannel.send(
+        focusEndedMessage(this.guild.client, this.voiceChannel, responseTimeoutMs),
+      );
     } catch (error) {
       logger.warn(`Não consegui enviar a mensagem de fim em ${this.guild.name}.`, error);
     }
@@ -209,27 +214,25 @@ export class PomodoroSession {
 
   private async onPromptTimeout(): Promise<void> {
     if (this.phase !== 'awaiting') return;
-    const prompt = this.prompt;
-    this.prompt = undefined;
+    const prompt = this.takeControlMessage();
     await prompt
-      ?.edit({
-        content: `${prompt.content}\n\n👋 Ninguém respondeu, então saí da sala. Até a próxima!`,
-        components: [],
-      })
+      ?.edit(promptTimedOutMessage(this.guild.client, this.voiceChannel))
       .catch(() => undefined);
     await this.stop('timeout');
   }
 
-  /** Tira a mensagem de pergunta do controle da sessão (quem chamou vai editá-la). */
-  takePrompt(): void {
-    this.prompt = undefined;
+  /** Tira a mensagem com botão do controle da sessão (quem chamou vai editá-la). */
+  takeControlMessage(): Message | undefined {
+    const message = this.controlMessage;
+    this.controlMessage = undefined;
+    return message;
   }
 
-  /** Remove os botões da mensagem de pergunta, se houver. */
-  async dismissPrompt(): Promise<void> {
-    const prompt = this.prompt;
-    this.prompt = undefined;
-    await prompt?.edit({ components: [] }).catch(() => undefined);
+  /** Remove o botão da mensagem atual, se houver. */
+  async dismissControlMessage(): Promise<void> {
+    await this.takeControlMessage()
+      ?.edit({ components: [] })
+      .catch(() => undefined);
   }
 
   /** Encerra tudo: desmuta, restaura o apelido e sai da sala. Idempotente. */
@@ -239,7 +242,7 @@ export class PomodoroSession {
     this.clearTimers();
     logger.info(`Encerrando Pomodoro em ${this.guild.name} (motivo: ${reason}).`);
 
-    await this.dismissPrompt();
+    await this.dismissControlMessage();
     await this.unmuteEveryone();
     await this.restoreNickname();
     await this.clearVoiceStatus(); // antes de sair: o bot precisa estar conectado
@@ -252,9 +255,7 @@ export class PomodoroSession {
     this.deps.onEnded(this);
 
     if (reason === 'disconnected') {
-      await this.textChannel
-        .send('⚠️ Fui desconectado da sala de voz. Pomodoro encerrado e microfones liberados.')
-        .catch(() => undefined);
+      await this.textChannel.send(disconnectedMessage(this.guild.client)).catch(() => undefined);
     }
   }
 

@@ -6,7 +6,8 @@ Bot de Discord que conduz sessões Pomodoro em uma sala de voz:
 - Quem **entrar na sala durante o Pomodoro** é mutado automaticamente.
 - Muda o **próprio apelido** para `Pomodoro: 25m` → `Pomodoro: 15m` (aos 10 min) → `Pomodoro: 5m` (faltando 5 min) e volta ao normal no fim.
 - Toca `orb.mp3` no início e **a cada 10 minutos**; toca `levelup.mp3` quando o Pomodoro acaba.
-- No fim, **desmuta todos** e pergunta no chat se querem começar outro (botões **Começar outro** / **Encerrar**).
+- O anúncio no chat traz o botão **Encerrar** enquanto o foco está rolando.
+- No fim, **desmuta todos** e pergunta no chat se querem começar outro (botão **Iniciar outro**).
 - Se ninguém responder em **2 minutos**, sai da sala.
 - Muda o **status da sala de voz** para `POMODORO ROLANDO 🍅` durante o foco (sobrescrevendo qualquer status anterior) e limpa ao acabar.
 - Usa `assets/icone.png` como **foto de perfil**.
@@ -27,7 +28,7 @@ Regras do `/pomodoro iniciar`:
 
 - Só funciona para quem **está na sala de voz do Pomodoro**; caso contrário o bot avisa que a pessoa não está na sala certa e não faz nada.
 - Se já houver um Pomodoro **em andamento**, não é possível iniciar outro — o bot avisa e mostra quando o atual termina.
-- Depois que um Pomodoro acaba (enquanto o bot pergunta se querem outro), `/pomodoro iniciar` ou o botão **Começar outro** iniciam o próximo. O botão repete a duração anterior.
+- Depois que um Pomodoro acaba (enquanto o bot pergunta se querem outro), `/pomodoro iniciar` ou o botão **Iniciar outro** iniciam o próximo. O botão repete a duração anterior.
 - Os avisos de erro aparecem só para quem usou o comando.
 
 ## Configuração
