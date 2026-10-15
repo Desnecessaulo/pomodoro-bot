@@ -15,7 +15,11 @@ import {
   type VoiceState,
 } from 'discord.js';
 import {
+  BREAK_ENDING_WARNING_MS,
+  BREAK_VOICE_STATUS_TEXT,
+  FOCUS_SOUND_FINAL_WARNING_MS,
   FOCUS_SOUND_INTERVAL_MS,
+  MINUTE_MS,
   NICKNAME_FINAL_WARNING_MS,
   NICKNAME_UPDATE_INTERVAL_MS,
   SOUNDS,
@@ -27,20 +31,32 @@ import type { GuildStore } from '../storage/GuildStore.js';
 import { SoundPlayer } from './audio.js';
 import {
   BUTTON_AGAIN,
+  BUTTON_BREAK,
   BUTTON_STOP,
+  breakMessage,
   disconnectedMessage,
   focusEndedMessage,
-  focusStartedMessage,
+  focusMessage,
   promptTimedOutMessage,
+  type Ending,
 } from './messages.js';
 import type { MuteService } from './MuteService.js';
 import { setVoiceChannelStatus } from './voiceStatus.js';
-import { buildIntervalMarks, buildNicknameSchedule, pomodoroNickname } from './time.js';
+import {
+  breakDurationFor,
+  breakNickname,
+  buildFocusSoundMarks,
+  buildIntervalMarks,
+  buildNicknameSchedule,
+  pomodoroNickname,
+} from './time.js';
 
-export type Phase = 'focus' | 'awaiting' | 'ended';
+export type Phase = 'focus' | 'break' | 'awaiting' | 'ended';
 export type StopReason = 'command' | 'button' | 'timeout' | 'disconnected' | 'shutdown';
 /** Envia (ou edita) a mensagem de anúncio e devolve a mensagem que ficou no chat. */
 export type Publish = (message: BaseMessageOptions) => Promise<Message>;
+/** Desenha a mensagem de controle no estado atual (ou como ela fica ao sair de cena). */
+type ControlView = (ending?: Ending) => BaseMessageOptions;
 
 export interface SessionDeps {
   config: AppConfig;
@@ -52,12 +68,21 @@ export interface SessionDeps {
 /** Um Pomodoro ativo em um servidor: conexão de voz, timers, mutes e apelido do bot. */
 export class PomodoroSession {
   phase: Phase = 'focus';
+  /** Fim da fase atual (foco ou pausa). */
   endsAt = 0;
   durationMs: number;
   private cycle = 0;
+  /** Tempo restante mostrado na mensagem; atualizado a cada minuto. */
+  private remainingMs = 0;
+  /** Quem clicou em "Pausa e +1 Pomodoro" durante o foco atual. */
+  private breakRequestedById?: string;
   private timers: NodeJS.Timeout[] = [];
-  /** Mensagem com o botão ativo: "Encerrar" durante o foco, "Iniciar outro" depois dele. */
+  /**
+   * Mensagem com os botões ativos: "Encerrar" (e "Pausa e +1 Pomodoro") durante o foco,
+   * "Encerrar" durante a pausa e "Iniciar outro" depois do foco.
+   */
   private controlMessage?: Message;
+  private controlView?: ControlView;
   private readonly sounds: SoundPlayer;
 
   private constructor(
@@ -112,11 +137,24 @@ export class PomodoroSession {
     return this.phase === 'focus';
   }
 
+  /** Duração da pausa oferecida após o foco atual (ausente se o foco for curto demais). */
+  private get breakMs(): number | undefined {
+    return breakDurationFor(this.durationMs);
+  }
+
   /** O botão clicado é o que está ativo agora (e não um de uma mensagem antiga)? */
   isActiveButton(messageId: string, customId: string): boolean {
-    const expected =
-      this.phase === 'focus' ? BUTTON_STOP : this.phase === 'awaiting' ? BUTTON_AGAIN : undefined;
-    return customId === expected && this.controlMessage?.id === messageId;
+    if (this.controlMessage?.id !== messageId) return false;
+    switch (customId) {
+      case BUTTON_STOP:
+        return this.phase === 'focus' || this.phase === 'break';
+      case BUTTON_BREAK:
+        return this.phase === 'focus' && !!this.breakMs && !this.breakRequestedById;
+      case BUTTON_AGAIN:
+        return this.phase === 'awaiting';
+      default:
+        return false;
+    }
   }
 
   /** Quem pode controlar: quem iniciou, quem está na sala ou quem gerencia o servidor. */
@@ -133,8 +171,8 @@ export class PomodoroSession {
   }
 
   /**
-   * Inicia um ciclo de foco e publica o anúncio (com o botão "Encerrar") via `publish`.
-   * Sem `durationMs`, repete a duração do ciclo anterior (usado pelo botão "Iniciar outro").
+   * Inicia um ciclo de foco e publica o anúncio (com os botões) via `publish`.
+   * Sem `durationMs`, repete a duração do ciclo anterior (botão "Iniciar outro" e +1 Pomodoro).
    */
   async startFocus(
     startedById: string,
@@ -144,17 +182,24 @@ export class PomodoroSession {
     this.clearTimers();
     this.controlMessage = undefined;
     this.startedById = startedById;
+    this.breakRequestedById = undefined;
     this.durationMs = durationMs;
     this.phase = 'focus';
     this.cycle += 1;
     this.endsAt = Date.now() + durationMs;
+    this.remainingMs = durationMs;
 
     await this.muteEveryone();
     await this.setNickname(pomodoroNickname(durationMs));
     await this.setVoiceStatus(VOICE_STATUS_TEXT);
     this.sounds.play(SOUNDS.focus);
 
-    for (const atMs of buildIntervalMarks(durationMs, FOCUS_SOUND_INTERVAL_MS)) {
+    const soundMarks = buildFocusSoundMarks(
+      durationMs,
+      FOCUS_SOUND_INTERVAL_MS,
+      FOCUS_SOUND_FINAL_WARNING_MS,
+    );
+    for (const atMs of soundMarks) {
       this.schedule(atMs, async () => this.sounds.play(SOUNDS.focus));
     }
     const steps = buildNicknameSchedule(
@@ -165,51 +210,133 @@ export class PomodoroSession {
     for (const step of steps) {
       this.schedule(step.atMs, () => this.setNickname(step.nickname));
     }
+    this.scheduleCountdown(durationMs);
     this.schedule(durationMs, () => this.finishFocus());
 
     logger.info(
       `Pomodoro #${this.cycle} iniciado em ${this.guild.name} (${this.voiceChannel.name}).`,
     );
-    const announcement = focusStartedMessage({
-      client: this.guild.client,
-      cycle: this.cycle,
-      durationMs,
-      endsAt: this.endsAt,
-      voiceChannel: this.voiceChannel,
-      startedById,
-    });
+    const cycle = this.cycle;
+    const endsAt = this.endsAt;
+    this.controlView = (ending) =>
+      focusMessage({
+        client: this.guild.client,
+        cycle,
+        remainingMs: this.remainingMs,
+        endsAt,
+        voiceChannel: this.voiceChannel,
+        startedById,
+        breakMs: this.breakMs,
+        breakRequestedById: this.breakRequestedById,
+        ending,
+      });
     try {
-      const message = await publish(announcement);
+      const message = await publish(this.controlView());
       // O foco pode ter sido parado enquanto a mensagem era enviada.
-      if (this.phase === 'focus') this.controlMessage = message;
+      if (this.phase === 'focus' && this.cycle === cycle) this.controlMessage = message;
       else await message.edit({ components: [] }).catch(() => undefined);
     } catch (error) {
       logger.warn(`Não consegui enviar o anúncio do Pomodoro em ${this.guild.name}.`, error);
     }
   }
 
-  /** Fim do foco: desmuta, restaura o apelido e pergunta se querem outro Pomodoro. */
+  /** Botão "Pausa e +1 Pomodoro": agenda a pausa e o próximo foco para o fim deste. */
+  async requestBreak(requestedById: string): Promise<void> {
+    if (this.phase !== 'focus' || !this.breakMs || this.breakRequestedById) return;
+    this.breakRequestedById = requestedById;
+    logger.info(`Pausa e +1 Pomodoro agendados em ${this.guild.name}.`);
+    await this.refreshControlMessage();
+  }
+
+  /** Fim do foco: segue para a pausa (se pedida) ou desmuta e pergunta se querem outro. */
   private async finishFocus(): Promise<void> {
     if (this.phase !== 'focus') return;
-    this.phase = 'awaiting';
     this.clearTimers();
-    await this.dismissControlMessage();
+    logger.info(`Pomodoro #${this.cycle} finalizado em ${this.guild.name}.`);
+    const breakMs = this.breakMs;
+    if (breakMs && this.breakRequestedById) {
+      return this.startBreak(breakMs, this.breakRequestedById);
+    }
 
+    this.phase = 'awaiting';
+    await this.closeControlMessage('done');
     await this.unmuteEveryone();
     await this.restoreNickname();
     await this.clearVoiceStatus();
     this.sounds.play(SOUNDS.end);
 
-    const { responseTimeoutMs } = this.deps.config;
+    this.controlView = undefined;
     try {
       this.controlMessage = await this.textChannel.send(
-        focusEndedMessage(this.guild.client, this.voiceChannel, responseTimeoutMs),
+        focusEndedMessage(this.guild.client, this.voiceChannel),
       );
     } catch (error) {
       logger.warn(`Não consegui enviar a mensagem de fim em ${this.guild.name}.`, error);
     }
-    this.schedule(responseTimeoutMs, () => this.onPromptTimeout());
-    logger.info(`Pomodoro #${this.cycle} finalizado em ${this.guild.name}.`);
+    this.schedule(this.deps.config.responseTimeoutMs, () => this.onPromptTimeout());
+  }
+
+  /** Pausa entre dois focos: desmuta todos e, ao acabar, começa o próximo Pomodoro sozinho. */
+  private async startBreak(breakMs: number, requestedById: string): Promise<void> {
+    this.phase = 'break';
+    this.endsAt = Date.now() + breakMs;
+    this.remainingMs = breakMs;
+    this.sounds.play(SOUNDS.end, SOUNDS.breakStart);
+
+    await this.unmuteEveryone();
+    await this.setNickname(breakNickname(breakMs));
+    await this.setVoiceStatus(BREAK_VOICE_STATUS_TEXT);
+
+    for (const step of buildNicknameSchedule(
+      breakMs,
+      NICKNAME_UPDATE_INTERVAL_MS,
+      NICKNAME_FINAL_WARNING_MS,
+      breakNickname,
+    )) {
+      this.schedule(step.atMs, () => this.setNickname(step.nickname));
+    }
+    if (breakMs > BREAK_ENDING_WARNING_MS) {
+      this.schedule(breakMs - BREAK_ENDING_WARNING_MS, async () =>
+        this.sounds.play(SOUNDS.breakEnding),
+      );
+    }
+    this.scheduleCountdown(breakMs);
+    this.schedule(breakMs, () => this.finishBreak(requestedById));
+    logger.info(`Pausa iniciada em ${this.guild.name}.`);
+
+    const endsAt = this.endsAt;
+    const nextCycle = this.cycle + 1;
+    const focusMs = this.durationMs;
+    this.controlView = (ending) =>
+      breakMessage({
+        client: this.guild.client,
+        remainingMs: this.remainingMs,
+        endsAt,
+        nextCycle,
+        focusMs,
+        voiceChannel: this.voiceChannel,
+        requestedById,
+        ending,
+      });
+    // "O texto muda": o anúncio do foco vira o da pausa (ou um novo, se não houver).
+    if (this.controlMessage) {
+      await this.refreshControlMessage();
+      return;
+    }
+    try {
+      const message = await this.textChannel.send(this.controlView());
+      if (this.phase === 'break') this.controlMessage = message;
+      else await message.edit({ components: [] }).catch(() => undefined);
+    } catch (error) {
+      logger.warn(`Não consegui enviar o anúncio da pausa em ${this.guild.name}.`, error);
+    }
+  }
+
+  private async finishBreak(startedById: string): Promise<void> {
+    if (this.phase !== 'break') return;
+    this.clearTimers();
+    await this.closeControlMessage('done');
+    await this.startFocus(startedById, (message) => this.textChannel.send(message));
   }
 
   private async onPromptTimeout(): Promise<void> {
@@ -235,6 +362,33 @@ export class PomodoroSession {
       .catch(() => undefined);
   }
 
+  /** Tira os botões da mensagem atual e a deixa com o estado final (concluído/encerrado). */
+  private async closeControlMessage(ending: Ending): Promise<void> {
+    const view = this.controlView;
+    const message = this.takeControlMessage();
+    await message?.edit(view ? view(ending) : { components: [] }).catch(() => undefined);
+  }
+
+  /** Redesenha a mensagem de controle (contagem regressiva, pausa agendada...). */
+  private async refreshControlMessage(): Promise<void> {
+    if (!this.controlMessage || !this.controlView) return;
+    await this.controlMessage
+      .edit(this.controlView())
+      .catch((error) =>
+        logger.warn(`Não consegui atualizar a mensagem em ${this.guild.name}.`, error.message),
+      );
+  }
+
+  /** Atualiza o "X minutos restantes" da mensagem a cada minuto. */
+  private scheduleCountdown(durationMs: number): void {
+    for (const atMs of buildIntervalMarks(durationMs, MINUTE_MS)) {
+      this.schedule(atMs, async () => {
+        this.remainingMs = durationMs - atMs;
+        await this.refreshControlMessage();
+      });
+    }
+  }
+
   /** Encerra tudo: desmuta, restaura o apelido e sai da sala. Idempotente. */
   async stop(reason: StopReason): Promise<void> {
     if (this.phase === 'ended') return;
@@ -242,7 +396,7 @@ export class PomodoroSession {
     this.clearTimers();
     logger.info(`Encerrando Pomodoro em ${this.guild.name} (motivo: ${reason}).`);
 
-    await this.dismissControlMessage();
+    await this.closeControlMessage('stopped');
     await this.unmuteEveryone();
     await this.restoreNickname();
     await this.clearVoiceStatus(); // antes de sair: o bot precisa estar conectado

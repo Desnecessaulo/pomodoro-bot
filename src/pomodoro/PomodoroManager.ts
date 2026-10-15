@@ -10,10 +10,10 @@ import type { AppConfig } from '../config.js';
 import { UserError } from '../errors.js';
 import { logger } from '../logger.js';
 import type { GuildStore } from '../storage/GuildStore.js';
-import { BUTTON_AGAIN, stoppedMessage } from './messages.js';
+import { BUTTON_AGAIN, BUTTON_BREAK, stoppedMessage } from './messages.js';
 import { MuteService } from './MuteService.js';
 import { isBot, PomodoroSession, type Publish, type StopReason } from './PomodoroSession.js';
-import { discordRelativeTime } from './time.js';
+import { formatClock } from './time.js';
 import { setVoiceChannelStatus } from './voiceStatus.js';
 
 const REQUIRED_VOICE_PERMISSIONS = [
@@ -57,8 +57,14 @@ export class PomodoroManager {
     if (existing?.phase === 'focus') {
       throw new UserError(
         `Já existe um Pomodoro em andamento em ${existing.voiceChannel} ` +
-          `(termina ${discordRelativeTime(existing.endsAt)}). ` +
+          `(termina às ${formatClock(existing.endsAt)}). ` +
           'Não é possível iniciar outro até ele acabar ou ser parado com `/pomodoro parar`.',
+      );
+    }
+    if (existing?.phase === 'break') {
+      throw new UserError(
+        `${existing.voiceChannel} está em pausa até ${formatClock(existing.endsAt)}; ` +
+          'o próximo Pomodoro começa automaticamente em seguida.',
       );
     }
     if (this.starting.has(guildId)) {
@@ -150,7 +156,10 @@ export class PomodoroManager {
     return true;
   }
 
-  /** Botões "Encerrar" (durante o foco) e "Iniciar outro" (depois do foco). */
+  /**
+   * Botões "Encerrar" (durante o foco e a pausa), "Pausa e +1 Pomodoro" (durante o foco) e
+   * "Iniciar outro" (depois do foco).
+   */
   async handleButton(interaction: ButtonInteraction<'cached'>): Promise<void> {
     const session = this.sessions.get(interaction.guildId);
     if (!session?.isActiveButton(interaction.message.id, interaction.customId)) {
@@ -161,16 +170,26 @@ export class PomodoroManager {
       return;
     }
     const isAgain = interaction.customId === BUTTON_AGAIN;
-    const allowed = isAgain
-      ? session.isInRoom(interaction.member)
-      : session.canControl(interaction.member);
+    const isBreak = interaction.customId === BUTTON_BREAK;
+    const allowed =
+      isAgain || isBreak
+        ? session.isInRoom(interaction.member)
+        : session.canControl(interaction.member);
     if (!allowed) {
       await interaction.reply({
-        content: isAgain
-          ? `Você não está na sala certa! Entre em ${session.voiceChannel} para começar outro Pomodoro.`
-          : `Só quem está em ${session.voiceChannel} pode encerrar.`,
+        content:
+          isAgain || isBreak
+            ? `Você não está na sala certa! Entre em ${session.voiceChannel} para começar outro Pomodoro.`
+            : `Só quem está em ${session.voiceChannel} pode encerrar.`,
         flags: 'Ephemeral',
       });
+      return;
+    }
+
+    // A pausa não troca a mensagem: a sessão a redesenha (sem o botão) e o foco continua.
+    if (isBreak) {
+      await interaction.deferUpdate();
+      await session.requestBreak(interaction.user.id);
       return;
     }
 

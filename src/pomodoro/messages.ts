@@ -7,10 +7,14 @@ import {
   type Client,
   type VoiceBasedChannel,
 } from 'discord.js';
-import { discordRelativeTime, formatDuration } from './time.js';
+import { formatClock, formatDuration, formatRemainingText } from './time.js';
 
 export const BUTTON_AGAIN = 'pomodoro:again';
 export const BUTTON_STOP = 'pomodoro:stop';
+export const BUTTON_BREAK = 'pomodoro:break';
+
+/** Como um anúncio de foco/pausa fica quando sai de cena (sem botões). */
+export type Ending = 'done' | 'stopped';
 
 const COLORS = {
   focus: 0xe74c3c,
@@ -32,34 +36,100 @@ export function pomodoroEmbed(
     .setDescription(lines.join('\n'));
 }
 
-function buttonRow(button: ButtonBuilder): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(button);
+function buttonRow(...buttons: ButtonBuilder[]): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons);
 }
 
-export function focusStartedMessage(options: {
-  client: Client;
-  cycle: number;
-  durationMs: number;
-  endsAt: number;
-  voiceChannel: VoiceBasedChannel;
-  startedById: string;
-}): BaseMessageOptions {
-  const { client, cycle, durationMs, endsAt, voiceChannel, startedById } = options;
-  const title = cycle > 1 ? `Pomodoro #${cycle} iniciado!` : 'Pomodoro iniciado!';
-  const embed = pomodoroEmbed(client, `🍅 ${title}`, COLORS.focus, [
-    `**Duração:** ${formatDuration(durationMs)}`,
-    `**Sala:** ${voiceChannel}`,
-    `**Termina:** ${discordRelativeTime(endsAt)}`,
-    `**Iniciado por:** <@${startedById}>`,
-    '',
-    '🔇 Microfones mutados — foco total!',
-  ]);
-  const stop = new ButtonBuilder()
+function stopButton(): ButtonBuilder {
+  return new ButtonBuilder()
     .setCustomId(BUTTON_STOP)
     .setLabel('Encerrar')
     .setEmoji('⏹️')
     .setStyle(ButtonStyle.Danger);
-  return { content: '', embeds: [embed], components: [buttonRow(stop)] };
+}
+
+/** "24 minutos restantes" enquanto corre; "Finalizado"/"Encerrado" quando sai de cena. */
+function durationLine(remainingMs: number, ending?: Ending, female = false) {
+  const suffix = female ? 'a' : 'o';
+  if (ending === 'done') return `Finalizad${suffix}`;
+  if (ending === 'stopped') return `Encerrad${suffix}`;
+  return formatRemainingText(remainingMs);
+}
+
+export function focusMessage(options: {
+  client: Client;
+  cycle: number;
+  remainingMs: number;
+  endsAt: number;
+  voiceChannel: VoiceBasedChannel;
+  startedById: string;
+  /** Duração da pausa oferecida pelo botão "Pausa e +1 Pomodoro" (ausente: sem botão). */
+  breakMs?: number;
+  /** Quem pediu a pausa e +1 Pomodoro, se já foi pedida. */
+  breakRequestedById?: string;
+  ending?: Ending;
+}): BaseMessageOptions {
+  const { client, cycle, remainingMs, endsAt, voiceChannel, startedById } = options;
+  const { breakMs, breakRequestedById, ending } = options;
+  const title = cycle > 1 ? `Pomodoro #${cycle} iniciado!` : 'Pomodoro iniciado!';
+  const lines = [
+    `**Duração:** ${durationLine(remainingMs, ending)}`,
+    `**Sala:** ${voiceChannel}`,
+    `**Termina:** ${formatClock(endsAt)}`,
+    `**Iniciado por:** <@${startedById}>`,
+  ];
+  if (!ending) {
+    lines.push('', '🔇 Microfones mutados — foco total!');
+    if (breakMs && breakRequestedById) {
+      lines.push(
+        `☕ Pausa de ${formatDuration(breakMs)} e +1 Pomodoro agendados por <@${breakRequestedById}>.`,
+      );
+    }
+  }
+  const embed = pomodoroEmbed(client, `🍅 ${title}`, COLORS.focus, lines);
+
+  if (ending) return { content: '', embeds: [embed], components: [] };
+  const buttons = [stopButton()];
+  if (breakMs && !breakRequestedById) {
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(BUTTON_BREAK)
+        .setLabel('Pausa e +1 Pomodoro')
+        .setEmoji('☕')
+        .setStyle(ButtonStyle.Primary),
+    );
+  }
+  return { content: '', embeds: [embed], components: [buttonRow(...buttons)] };
+}
+
+export function breakMessage(options: {
+  client: Client;
+  remainingMs: number;
+  endsAt: number;
+  nextCycle: number;
+  focusMs: number;
+  voiceChannel: VoiceBasedChannel;
+  requestedById: string;
+  ending?: Ending;
+}): BaseMessageOptions {
+  const { client, remainingMs, endsAt, nextCycle, focusMs, voiceChannel, ending } = options;
+  const lines = [
+    `**Duração:** ${durationLine(remainingMs, ending, true)}`,
+    `**Sala:** ${voiceChannel}`,
+    `**Termina:** ${formatClock(endsAt)}`,
+    `**Pedida por:** <@${options.requestedById}>`,
+    '',
+  ];
+  if (ending === 'done') lines.push(`🍅 Pomodoro #${nextCycle} começando!`);
+  else if (ending === 'stopped') lines.push('⏹️ Pausa encerrada.');
+  else {
+    lines.push(
+      '🔊 Microfones liberados — aproveite a pausa!',
+      `🍅 Em seguida começa o Pomodoro #${nextCycle} (${formatDuration(focusMs)}) automaticamente.`,
+    );
+  }
+  const embed = pomodoroEmbed(client, '☕ Pausa!', ending ? COLORS.ended : COLORS.break, lines);
+  return { content: '', embeds: [embed], components: ending ? [] : [buttonRow(stopButton())] };
 }
 
 function focusEndedLines(voiceChannel: VoiceBasedChannel): string[] {
@@ -69,12 +139,11 @@ function focusEndedLines(voiceChannel: VoiceBasedChannel): string[] {
 export function focusEndedMessage(
   client: Client,
   voiceChannel: VoiceBasedChannel,
-  responseTimeoutMs: number,
 ): BaseMessageOptions {
   const embed = pomodoroEmbed(client, '⏰ O Pomodoro acabou!', COLORS.break, [
     ...focusEndedLines(voiceChannel),
     '',
-    `Querem começar outro? Se ninguém responder em ${formatDuration(responseTimeoutMs)}, eu saio da sala.`,
+    'Querem começar outro?',
   ]);
   const again = new ButtonBuilder()
     .setCustomId(BUTTON_AGAIN)
@@ -115,15 +184,23 @@ export function statusMessage(
   client: Client,
   state:
     | { phase: 'focus'; voiceChannel: VoiceBasedChannel; endsAt: number }
+    | { phase: 'break'; voiceChannel: VoiceBasedChannel; endsAt: number }
     | { phase: 'awaiting'; voiceChannel: VoiceBasedChannel }
     | { phase: 'idle'; configuredChannelId?: string },
 ): BaseMessageOptions {
   let embed: EmbedBuilder;
-  if (state.phase === 'focus') {
-    embed = pomodoroEmbed(client, '🍅 Foco em andamento', COLORS.focus, [
-      `**Sala:** ${state.voiceChannel}`,
-      `**Termina:** ${discordRelativeTime(state.endsAt)}`,
-    ]);
+  if (state.phase === 'focus' || state.phase === 'break') {
+    const isFocus = state.phase === 'focus';
+    embed = pomodoroEmbed(
+      client,
+      isFocus ? '🍅 Foco em andamento' : '☕ Pausa em andamento',
+      isFocus ? COLORS.focus : COLORS.break,
+      [
+        `**Duração:** ${formatRemainingText(Math.max(0, state.endsAt - Date.now()))}`,
+        `**Sala:** ${state.voiceChannel}`,
+        `**Termina:** ${formatClock(state.endsAt)}`,
+      ],
+    );
   } else if (state.phase === 'awaiting') {
     embed = pomodoroEmbed(client, '⏰ O Pomodoro acabou', COLORS.break, [
       `**Sala:** ${state.voiceChannel}`,

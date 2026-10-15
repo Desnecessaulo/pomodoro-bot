@@ -51,18 +51,26 @@ export function loadConfig() {
 export type AppConfig = ReturnType<typeof loadConfig>;
 
 /** Intervalo entre as atualizações do apelido e o aviso extra antes do fim. */
-export const NICKNAME_UPDATE_INTERVAL_MS = 10 * MINUTE_MS;
+export const NICKNAME_UPDATE_INTERVAL_MS = 5 * MINUTE_MS;
 export const NICKNAME_FINAL_WARNING_MS = 5 * MINUTE_MS;
 
 /** Status exibido na sala de voz durante o foco (sobrescreve qualquer status anterior). */
 export const VOICE_STATUS_TEXT = 'POMODORO ROLANDO 🍅';
+/** Status exibido na sala de voz durante a pausa. */
+export const BREAK_VOICE_STATUS_TEXT = 'POMODORO PAUSA ☕';
 
-/** O som de foco (orb.mp3) toca no início e a cada este intervalo. */
+/** O som de foco (orb.mp3) toca no início, a cada este intervalo e quando faltar o aviso final. */
 export const FOCUS_SOUND_INTERVAL_MS = 10 * MINUTE_MS;
+export const FOCUS_SOUND_FINAL_WARNING_MS = 5 * MINUTE_MS;
+
+/** Quanto antes do fim da pausa toca o aviso (smw_princess_help.wav). */
+export const BREAK_ENDING_WARNING_MS = MINUTE_MS;
 
 export const DATA_FILE = fileURLToPath(new URL('../data/store.json', import.meta.url));
 export const AVATAR_FILE = fileURLToPath(new URL('../assets/icone.png', import.meta.url));
 export const SOUNDS = {
   focus: fileURLToPath(new URL('../assets/sounds/orb.mp3', import.meta.url)),
   end: fileURLToPath(new URL('../assets/sounds/levelup.mp3', import.meta.url)),
+  breakStart: fileURLToPath(new URL('../assets/sounds/smw_pause.wav', import.meta.url)),
+  breakEnding: fileURLToPath(new URL('../assets/sounds/smw_princess_help.wav', import.meta.url)),
 } as const;

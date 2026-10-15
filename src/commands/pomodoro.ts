@@ -53,9 +53,9 @@ export const pomodoroCommand: Command = {
       case 'status': {
         const { client } = interaction;
         const message =
-          session?.phase === 'focus'
+          session?.phase === 'focus' || session?.phase === 'break'
             ? statusMessage(client, {
-                phase: 'focus',
+                phase: session.phase,
                 voiceChannel: session.voiceChannel,
                 endsAt: session.endsAt,
               })

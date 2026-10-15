@@ -4,10 +4,13 @@ Bot de Discord que conduz sessões Pomodoro em uma sala de voz:
 
 - Entra na sala de voz configurada e **muta (mute de servidor) todos** por 25 minutos (ou o tempo escolhido, até 59).
 - Quem **entrar na sala durante o Pomodoro** é mutado automaticamente.
-- Muda o **próprio apelido** para `Pomodoro: 25m` → `Pomodoro: 15m` (aos 10 min) → `Pomodoro: 5m` (faltando 5 min) e volta ao normal no fim.
-- Toca `orb.mp3` no início e **a cada 10 minutos**; toca `levelup.mp3` quando o Pomodoro acaba.
-- O anúncio no chat traz o botão **Encerrar** enquanto o foco está rolando.
-- No fim, **desmuta todos** e pergunta no chat se querem começar outro (botão **Iniciar outro**).
+- Muda o **próprio apelido** a cada 5 minutos para mostrar quanto falta: `Pomodoro: 25m` → `20m` → `15m` → `10m` → `5m`, e volta ao normal no fim.
+- Toca `orb.mp3` no início, **a cada 10 minutos** e quando faltam 5 minutos; toca `levelup.mp3` quando o Pomodoro acaba.
+- O anúncio no chat mostra os **minutos restantes** (atualizados a cada minuto) e o **horário de término** (horário de Brasília), com os botões **Encerrar** e **Pausa e +1 Pomodoro**.
+- **Pausa e +1 Pomodoro** (só para Pomodoros de 25 min ou mais): no fim do foco começa uma pausa — 5 min para Pomodoros de 25 a 49 min, 10 min para 50 a 59 min — e, depois dela, outro Pomodoro com a mesma duração começa sozinho.
+  - Na pausa, todos são desmutados, o apelido vira `Pomodoro PAUSA: 5m`, o status da sala vira `POMODORO PAUSA ☕` e o anúncio passa a mostrar a pausa.
+  - Sons: `levelup.mp3` seguido de `smw_pause.wav` no início da pausa, `smw_princess_help.wav` faltando 1 minuto e `orb.mp3` quando o próximo Pomodoro começa.
+- Sem pausa agendada, no fim **desmuta todos** e pergunta no chat se querem começar outro (botão **Iniciar outro**).
 - Se ninguém responder em **2 minutos**, sai da sala.
 - Muda o **status da sala de voz** para `POMODORO ROLANDO 🍅` durante o foco (sobrescrevendo qualquer status anterior) e limpa ao acabar.
 - Usa `assets/icone.png` como **foto de perfil**.
@@ -27,7 +30,7 @@ As mensagens do Pomodoro são enviadas no canal de texto em que `/pomodoro inici
 Regras do `/pomodoro iniciar`:
 
 - Só funciona para quem **está na sala de voz do Pomodoro**; caso contrário o bot avisa que a pessoa não está na sala certa e não faz nada.
-- Se já houver um Pomodoro **em andamento**, não é possível iniciar outro — o bot avisa e mostra quando o atual termina.
+- Se já houver um Pomodoro (ou uma pausa) **em andamento**, não é possível iniciar outro — o bot avisa e mostra quando o atual termina.
 - Depois que um Pomodoro acaba (enquanto o bot pergunta se querem outro), `/pomodoro iniciar` ou o botão **Iniciar outro** iniciam o próximo. O botão repete a duração anterior.
 - Os avisos de erro aparecem só para quem usou o comando.
 
@@ -79,15 +82,15 @@ Para colocar o bot online 24h (Railway ou VPS com Docker), veja o **[DEPLOY.md](
 
 ## Variáveis de ambiente
 
-| Variável                   | Padrão | Descrição                                                        |
-| -------------------------- | ------ | ---------------------------------------------------------------- |
-| `DISCORD_TOKEN`            | —      | Token do bot (obrigatório)                                       |
-| `DISCORD_CLIENT_ID`        | —      | Application ID (obrigatório)                                     |
-| `DEV_GUILD_ID`             | —      | Servidor para registrar comandos instantaneamente                |
-| `POMODORO_MINUTES`         | `25`   | Duração padrão quando `minutos` não é informado (máx. 59)        |
-| `RESPONSE_TIMEOUT_MINUTES` | `2`    | Tempo de espera pela resposta antes de sair                      |
-| `SOUNDS_ENABLED`           | `true` | Toca `orb.mp3` no início e a cada 10 min, e `levelup.mp3` no fim |
-| `LOG_LEVEL`                | `info` | `debug`, `info`, `warn` ou `error`                               |
+| Variável                   | Padrão | Descrição                                                 |
+| -------------------------- | ------ | --------------------------------------------------------- |
+| `DISCORD_TOKEN`            | —      | Token do bot (obrigatório)                                |
+| `DISCORD_CLIENT_ID`        | —      | Application ID (obrigatório)                              |
+| `DEV_GUILD_ID`             | —      | Servidor para registrar comandos instantaneamente         |
+| `POMODORO_MINUTES`         | `25`   | Duração padrão quando `minutos` não é informado (máx. 59) |
+| `RESPONSE_TIMEOUT_MINUTES` | `2`    | Tempo de espera pela resposta antes de sair               |
+| `SOUNDS_ENABLED`           | `true` | Liga os efeitos sonoros (foco, fim e pausa)               |
+| `LOG_LEVEL`                | `info` | `debug`, `info`, `warn` ou `error`                        |
 
 ## Comportamento e garantias
 
@@ -112,7 +115,7 @@ src/
 ├── events/                   # Handlers de ready e interactionCreate
 ├── pomodoro/
 │   ├── PomodoroManager.ts    # Uma sessão por servidor; reage a entradas/saídas da sala
-│   ├── PomodoroSession.ts    # Ciclo de foco, timers, apelido, botões e conexão de voz
+│   ├── PomodoroSession.ts    # Ciclos de foco e pausa, timers, apelido, botões e conexão de voz
 │   ├── MuteService.ts        # Mute/desmute com registro persistente
 │   ├── audio.ts              # Efeitos sonoros
 │   └── time.ts               # Cálculo dos apelidos e formatação (com testes)
